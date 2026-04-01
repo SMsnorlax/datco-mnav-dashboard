@@ -17,6 +17,10 @@ STOCK_TICKER = "MSTR"
 BTC_TICKER = "BTC-USD"
 # Current balance snapshot sourced from BitcoinTreasuries.
 CURRENT_BTC_HOLDINGS = 762_099
+# Filing-based fallback snapshot for basic shares outstanding:
+# 263,912,697 Class A + 19,640,250 Class B = 283,552,947 total
+# (Strategy 10-Q, as of July 31, 2025)
+FALLBACK_BASIC_SHARES_OUTSTANDING = 283_552_947
 
 # -----------------------------
 # Data loading helpers
@@ -60,7 +64,8 @@ def get_shares_outstanding() -> float:
     if market_cap and price > 0:
         return float(market_cap) / price
 
-    raise RuntimeError("Unable to estimate shares outstanding.")
+    # Final fallback: use a recent filing-based snapshot if Yahoo metadata is unavailable.
+    return float(FALLBACK_BASIC_SHARES_OUTSTANDING)
 
 
 def compute_indicator(df: pd.DataFrame, shares_outstanding: float) -> pd.DataFrame:
@@ -152,7 +157,7 @@ with st.expander("Methodology and limitations"):
         f"""
 - This project uses **Yahoo Finance data via yfinance** for daily adjusted close prices of **{STOCK_TICKER}** and **{BTC_TICKER}**.
 - It uses a **current BTC holdings snapshot of {CURRENT_BTC_HOLDINGS:,} BTC** for Strategy.
-- Shares outstanding are pulled from Yahoo Finance company metadata when available.
+- Shares outstanding are pulled from Yahoo Finance company metadata when available; if Yahoo metadata is unavailable, the app falls back to a recent filing-based snapshot.
 - Therefore, this implementation is a **proxy mNAV** series rather than a fully point-in-time institutional dataset.
 - If you want a more exact production version, replace the constant holdings assumption with a dated holdings history table from company filings or a treasury data vendor.
         """
