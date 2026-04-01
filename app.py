@@ -1,45 +1,56 @@
-import os
-from datetime import date, timedelta
-
-import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 import yfinance as yf
 
-# -----------------------------
-# Configuration
-# -----------------------------
 st.set_page_config(page_title="DAT.co mNAV Dashboard", layout="wide")
 
 COMPANY_NAME = "Strategy (MSTR)"
 STOCK_TICKER = "MSTR"
 BTC_TICKER = "BTC-USD"
-# Current balance snapshot sourced from BitcoinTreasuries.
 CURRENT_BTC_HOLDINGS = 762_099
-# Filing-based fallback snapshot for basic shares outstanding:
-# 263,912,697 Class A + 19,640,250 Class B = 283,552,947 total
-# (Strategy 10-Q, as of July 31, 2025)
 FALLBACK_BASIC_SHARES_OUTSTANDING = 283_552_947
 
-# -----------------------------
-# Data loading helpers
-# -----------------------------
+
 @st.cache_data(ttl=60 * 60)
 def load_price_data(period: str = "1y") -> pd.DataFrame:
-    tickers = yf.download([STOCK_TICKER, BTC_TICKER], period=period, interval="1d", auto_adjust=True, progress=False)
+    data = yf.download(
+        [STOCK_TICKER, BTC_TICKER],
+        period=period,
+        interval="1d",
+        auto_adjust=True,
+        progress=False,
+        group_by="column",
+        threads=False,
+    )
 
-    # yfinance may return a MultiIndex or flat columns depending on version.
-    if isinstance(tickers.columns, pd.MultiIndex):
-        stock_close = tickers[("Close", STOCK_TICKER)].rename("stock_close")
-        btc_close = tickers[("Close", BTC_TICKER)].rename("btc_close")
-    else:
-        stock_close = tickers[f"Close_{STOCK_TICKER}"] if f"Close_{STOCK_TICKER}" in tickers.columns else tickers["Close"]
-        btc_close = tickers[f"Close_{BTC_TICKER}"] if f"Close_{BTC_TICKER}" in tickers.columns else tickers["Close"]
+    if data is None or data.empty:
+        return pd.DataFrame(columns=["date", "stock_close", "btc_close"])
+
+    try:
+        if isinstance(data.columns, pd.MultiIndex):
+            stock_close = data[("Close", STOCK_TICKER)].rename("stock_close")
+            btc_close = data[("Close", BTC_TICKER)].rename("btc_close")
+        else:
+            if "Close" in data.columns:
+                # Single-ticker fallback shape; not expected here but safe.
+                return pd.DataFrame(columns=["date", "stock_close", "btc_close"])
+            stock_col = f"Close_{STOCK_TICKER}"
+            btc_col = f"Close_{BTC_TICKER}"
+            if stock_col not in data.columns or btc_col not in data.columns:
+                return pd.DataFrame(columns=["date", "stock_close", "btc_close"])
+            stock_close = data[stock_col].rename("stock_close")
+            btc_close = data[btc_col].rename("btc_close")
+    except Exception:
+        return pd.DataFrame(columns=["date", "stock_close", "btc_close"])
 
     df = pd.concat([stock_close, btc_close], axis=1).dropna().reset_index()
-    df.columns = ["date", "stock_close", "btc_close"]
-    return df
+    if df.empty:
+        return pd.DataFrame(columns=["date", "stock_close", "btc_close"])
+
+    first_col = df.columns[0]
+    df = df.rename(columns={first_col: "date"})
+    return df[["date", "stock_close", "btc_close"]]
 
 
 @st.cache_data(ttl=60 * 60)
@@ -55,20 +66,24 @@ def get_shares_outstanding() -> float:
     if shares and shares > 0:
         return float(shares)
 
-    hist = ticker.history(period="5d", auto_adjust=True)
-    if hist.empty:
-        raise RuntimeError("Unable to retrieve share count or recent price data from Yahoo Finance.")
+    try:
+        hist = ticker.history(period="5d", auto_adjust=True)
+    except Exception:
+        hist = pd.DataFrame()
 
-    price = float(hist["Close"].dropna().iloc[-1])
-    market_cap = info.get("marketCap")
-    if market_cap and price > 0:
-        return float(market_cap) / price
+    if not hist.empty and "Close" in hist.columns and not hist["Close"].dropna().empty:
+        price = float(hist["Close"].dropna().iloc[-1])
+        market_cap = info.get("marketCap")
+        if market_cap and price > 0:
+            return float(market_cap) / price
 
-    # Final fallback: use a recent filing-based snapshot if Yahoo metadata is unavailable.
     return float(FALLBACK_BASIC_SHARES_OUTSTANDING)
 
 
 def compute_indicator(df: pd.DataFrame, shares_outstanding: float) -> pd.DataFrame:
+    if df.empty:
+        return df.copy()
+
     out = df.copy()
     out["btc_per_share"] = CURRENT_BTC_HOLDINGS / shares_outstanding
     out["nav_per_share_proxy"] = out["btc_close"] * out["btc_per_share"]
@@ -80,25 +95,39 @@ def compute_indicator(df: pd.DataFrame, shares_outstanding: float) -> pd.DataFra
 
 
 def generate_rule_based_summary(df: pd.DataFrame) -> str:
+    if df.empty:
+        return "No data is available right now. Please try another time range or refresh the app later."
+
     latest = df.iloc[-1]
     lookback = df.tail(min(30, len(df)))
     avg_30 = lookback["mnav_proxy"].mean()
     trend = "higher" if latest["mnav_proxy"] > avg_30 else "lower"
-    btc_trend = "up" if latest["btc_return_30d_pct"] > 0 else "down"
+
+    btc_return = latest.get("btc_return_30d_pct", float("nan"))
+    mnav_change = latest.get("mnav_change_30d_pct", float("nan"))
+
+    if pd.isna(btc_return):
+        btc_phrase = "Bitcoin 30-day return is not yet available"
+    else:
+        btc_trend = "up" if btc_return > 0 else "down"
+        btc_phrase = f"Bitcoin is {btc_trend} {abs(btc_return):.1f}% over the last 30 trading days"
+
+    if pd.isna(mnav_change):
+        mnav_phrase = "proxy mNAV 30-day change is not yet available"
+    else:
+        mnav_phrase = f"proxy mNAV changed {mnav_change:+.1f}%"
+
     premium_state = "premium" if latest["premium_to_nav_proxy_pct"] >= 0 else "discount"
 
     return (
         f"The latest proxy mNAV for {COMPANY_NAME} is {latest['mnav_proxy']:.2f}x, which implies the stock is trading "
         f"at a {premium_state} of {latest['premium_to_nav_proxy_pct']:.1f}% relative to its Bitcoin NAV proxy. "
         f"Compared with the recent 30-day average ({avg_30:.2f}x), today's reading is {trend}. "
-        f"Over the last 30 trading days, Bitcoin is {btc_trend} {abs(latest['btc_return_30d_pct']):.1f}%, while proxy mNAV changed "
-        f"{latest['mnav_change_30d_pct']:+.1f}%. A rising mNAV typically suggests equity investors are assigning additional strategic, leverage, or optionality value beyond spot BTC exposure; a falling mNAV suggests that premium is compressing."
+        f"{btc_phrase}, while {mnav_phrase}. "
+        f"A rising mNAV typically suggests equity investors are assigning additional strategic, leverage, or optionality value beyond spot BTC exposure; a falling mNAV suggests that premium is compressing."
     )
 
 
-# -----------------------------
-# UI
-# -----------------------------
 st.title("DAT.co Indicator Dashboard")
 st.subheader("Strategy (MSTR) proxy mNAV monitor")
 
@@ -123,6 +152,12 @@ try:
     df = compute_indicator(raw, shares_outstanding)
 except Exception as e:
     st.error(f"Failed to load data: {e}")
+    st.stop()
+
+if df.empty:
+    st.warning(
+        "No market data was returned for the selected range. This usually means Yahoo Finance temporarily returned an empty response. Please refresh the page or try another time range."
+    )
     st.stop()
 
 latest = df.iloc[-1]
