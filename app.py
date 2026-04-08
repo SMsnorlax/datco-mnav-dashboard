@@ -3,7 +3,7 @@ import plotly.express as px
 import streamlit as st
 import yfinance as yf
 import google.generativeai as genai
-from datetime import datetime, timedelta  # 新增：用於精確計算日期
+from datetime import datetime, timedelta
 
 st.set_page_config(page_title="DAT.co mNAV Dashboard", layout="wide")
 
@@ -167,7 +167,7 @@ def generate_gemini_summary(df: pd.DataFrame, api_key: str) -> str:
     except Exception as e:
         return f"Error generating AI summary: {e}"
 
-st.sidebar.header("✨ Bonus Feature: AI Summary")
+st.sidebar.header("🤖 Robo-Advisor: AI Market Insight")
 api_key_input = st.sidebar.text_input("Enter Gemini API Key", type="password", help="Enter your Gemini API Key to unlock AI-generated market insights.")
 
 st.title("DAT.co Indicator Dashboard")
