@@ -2,7 +2,8 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 import yfinance as yf
-import google.generativeai as genai  # 新增：引入 Gemini API 套件
+import google.generativeai as genai
+from datetime import datetime, timedelta  # 新增：用於精確計算日期
 
 st.set_page_config(page_title="DAT.co mNAV Dashboard", layout="wide")
 
@@ -14,9 +15,22 @@ FALLBACK_BASIC_SHARES_OUTSTANDING = 283_552_947
 
 @st.cache_data(ttl=60 * 60)
 def load_price_data(period: str = "1y") -> pd.DataFrame:
+    # 終極解法：自己計算精確的起訖日期，避免 yfinance 的 period 參數對齊錯誤
+    end_date = datetime.now()
+    
+    if period == "6mo":
+        start_date = end_date - timedelta(days=180)
+    elif period == "1y":
+        start_date = end_date - timedelta(days=365)
+    elif period == "2y":
+        start_date = end_date - timedelta(days=730)
+    else: # "5y"
+        start_date = end_date - timedelta(days=1825)
+
     data = yf.download(
         [STOCK_TICKER, BTC_TICKER],
-        period=period,
+        start=start_date.strftime('%Y-%m-%d'),
+        end=end_date.strftime('%Y-%m-%d'),
         interval="1d",
         auto_adjust=True,
         progress=False,
@@ -123,7 +137,6 @@ def generate_rule_based_summary(df: pd.DataFrame) -> str:
         f"A rising mNAV typically suggests equity investors are assigning additional strategic, leverage, or optionality value beyond spot BTC exposure; a falling mNAV suggests that premium is compressing."
     )
 
-# 新增：讓 Gemini 生成摘要的函式
 def generate_gemini_summary(df: pd.DataFrame, api_key: str) -> str:
     if df.empty:
         return "No data available to generate AI summary."
@@ -154,7 +167,6 @@ def generate_gemini_summary(df: pd.DataFrame, api_key: str) -> str:
     except Exception as e:
         return f"Error generating AI summary: {e}"
 
-# 新增：側邊欄讓使用者輸入 API Key
 st.sidebar.header("✨ Bonus Feature: AI Summary")
 api_key_input = st.sidebar.text_input("Enter Gemini API Key", type="password", help="Enter your Gemini API Key to unlock AI-generated market insights.")
 
@@ -212,7 +224,6 @@ fig3.update_layout(legend_title_text="Series")
 st.plotly_chart(fig3, use_container_width=True)
 
 st.markdown("### Summary")
-# 修改：根據是否輸入 API Key 來決定顯示哪種摘要
 if api_key_input:
     with st.spinner("AI is analyzing the market data..."):
         ai_summary = generate_gemini_summary(df, api_key_input)
